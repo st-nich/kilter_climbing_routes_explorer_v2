@@ -132,7 +132,8 @@ if len(filtered_df) > max_points:
         chart_df = filtered_df.sort_values(sort_candidates[0], ascending=False).head(max_points)
         st.caption(f"Showing top {max_points} of {len(filtered_df)} routes (sorted by {sort_candidates[0]})")
     else:
-        chart_df = filtered_df.sample(max_points)
+        # CRITICAL FIX: random_state=42 ensures the points don't move/change on click
+        chart_df = filtered_df.sample(max_points, random_state=42)
         st.caption(f"Showing random {max_points} of {len(filtered_df)} routes")
 else:
     chart_df = filtered_df
@@ -169,13 +170,13 @@ with col1:
         size=alt.condition(sel, alt.value(200), alt.value(80))
     ).add_params(sel).interactive()
 
-    # RENDER WITH ON_SELECT (Fixes the clicking issue)
-    # This requires Streamlit >= 1.35.0
+    # RENDER WITH ON_SELECT
+    # Using on_select="rerun" to ensure the app catches the click
     try:
-        event = st.altair_chart(points, use_container_width=True, on_select="rerun", theme="streamlit")
+        event = st.altair_chart(points, on_select="rerun", theme="streamlit", use_container_width=True)
     except TypeError:
-        st.error("⚠️ You need a newer version of Streamlit (>=1.35) for click events to work perfectly.")
-        event = st.altair_chart(points, use_container_width=True, theme="streamlit")
+        st.error("⚠️ Streamlit version issue. Please restart runtime.")
+        event = None
 
 # --- RIGHT: BOARD VIEW ---
 with col2:
@@ -190,10 +191,12 @@ with col2:
             # Altair returns a list of dicts, grab the first one
             selected_uuid = selection_data[0]['uuid']
             
-            # Look up details
-            row = df[df['uuid'] == selected_uuid].iloc[0]
-            selected_name = row[name_col]
-            selected_grade = f"V{row['normalized_grade']}"
+            # Look up details in the FULL dataframe (not just the sample)
+            # This ensures even if something weird happens with sampling, we find the route
+            if selected_uuid in df['uuid'].values:
+                row = df[df['uuid'] == selected_uuid].iloc[0]
+                selected_name = row[name_col]
+                selected_grade = f"V{row['normalized_grade']}"
 
     # 2. Check if user SEARCHED (Override click if search matches exactly 1)
     if search_query and len(filtered_df) == 1:
@@ -233,3 +236,8 @@ with col2:
     else:
         st.info("👆 Tap a dot on the chart to view")
         st.markdown(generate_board_svg(None, {}, {}), unsafe_allow_html=True)
+    
+    # DEBUG EXPANDER (Hidden unless needed)
+    with st.expander("Debug Info"):
+        st.write("Event Data:", event)
+        st.write("Selected UUID:", selected_uuid)
