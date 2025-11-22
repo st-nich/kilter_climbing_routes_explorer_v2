@@ -14,16 +14,18 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
+# Optimize for mobile interactions
 st.markdown("""
     <style>
         .block-container { padding-top: 1rem; padding-bottom: 0rem; }
         h1 { margin-bottom: 0px; font-size: 1.5rem; }
-        canvas { width: 100% !important; }
+        /* Force canvas to be crisp */
+        canvas { image-rendering: pixelated; } 
     </style>
 """, unsafe_allow_html=True)
 
 # ==========================================
-# DATA LOADING & NORMALIZATION
+# DATA LOADING
 # ==========================================
 @st.cache_data
 def load_data():
@@ -37,151 +39,197 @@ def load_data():
 raw_df, holds_map, layout_map = load_data()
 
 if raw_df is None:
-    st.error("Data file 'kilter_app_data.pkl' not found. Run the pipeline script first.")
+    st.error("Data file 'kilter_app_data.pkl' not found. Please run the pipeline script.")
     st.stop()
 
-# --- Normalize Columns ---
 df = raw_df.copy()
 
-# 1. Fix Difficulty
-if 'display_difficulty' in df.columns:
-    df.rename(columns={'display_difficulty': 'difficulty'}, inplace=True)
-elif 'difficulty' not in df.columns:
-    cols = [c for c in df.columns if 'diff' in c.lower() or 'grade' in c.lower()]
-    if cols:
-        df.rename(columns={cols[0]: 'difficulty'}, inplace=True)
-    else:
-        df['difficulty'] = 0 
-
-# 2. Fix Name
-if 'name' not in df.columns:
-    name_candidates = ['Name', 'climb_name', 'title', 'route_name']
-    found = False
-    for c in name_candidates:
-        if c in df.columns:
-            df.rename(columns={c: 'name'}, inplace=True)
-            found = True
-            break
-    if not found:
-        df['name'] = "Route " + df['uuid'].astype(str).str[:6]
-
-# 3. Fix Angle
-if 'angle' not in df.columns:
-    df['angle'] = 'Unknown'
-
-df['difficulty'] = pd.to_numeric(df['difficulty'], errors='coerce').fillna(0).astype(int)
-
 # ==========================================
-# SIDEBAR / FILTERS
+# SIDEBAR: SETTINGS & DEBUGGING
 # ==========================================
 with st.sidebar:
-    st.header("Filters")
+    st.header("⚙️ App Settings")
     
-    min_grade = int(df['difficulty'].min())
-    max_grade = int(df['difficulty'].max())
+    # --- 1. Fix Route Names ---
+    st.subheader("Data Mapping")
+    cols = df.columns.tolist()
     
-    if min_grade == max_grade:
-        grade_range = (min_grade, max_grade)
-        st.info(f"All climbs are V{min_grade}")
-    else:
-        grade_range = st.slider("Difficulty", min_grade, max_grade, (min_grade, max_grade))
-    
-    mask = (
-        (df['difficulty'] >= grade_range[0]) & 
-        (df['difficulty'] <= grade_range[1])
+    # Intelligent default for name column
+    default_name_col = cols[0]
+    for c in ['climb_name', 'name', 'title', 'route']:
+        if c in cols:
+            default_name_col = c
+            break
+            
+    name_col = st.selectbox(
+        "Which column is the Name?", 
+        cols, 
+        index=cols.index(default_name_col),
+        help="If names look wrong, change this column."
     )
-    filtered_df = df[mask].copy()
+    
+    # --- 2. Fix Difficulty ---
+    # Intelligent default for grade
+    default_grade_col = cols[0]
+    for c in ['difficulty', 'grade', 'display_difficulty', 'v_grade']:
+        if c in cols:
+            default_grade_col = c
+            break
+            
+    grade_col = st.selectbox("Which column is the Grade?", cols, index=cols.index(default_grade_col))
+    
+    # Ensure grade is numeric for sliders
+    df['normalized_grade'] = pd.to_numeric(df[grade_col], errors='coerce').fillna(0).astype(int)
+    
+    # --- 3. Performance Tuning ---
+    st.divider()
+    st.subheader("Performance")
+    max_points = st.slider(
+        "Max Dots (Improves Zoom Speed)", 
+        min_value=500, 
+        max_value=len(df), 
+        value=2000, 
+        step=500,
+        help="Showing 8k points on a phone is laggy. Lower this for smoother zooming."
+    )
 
 # ==========================================
-# VIZ: BOARD RENDERER (SVG)
+# MAIN FILTERS
 # ==========================================
-def generate_board_svg(route_uuid, all_holds, layout):
-    width, height = 150, 160 
-    
-    svg_elements = []
-    svg_elements.append(f'<rect x="0" y="0" width="{width}" height="{height}" fill="#111" rx="5" />')
-    
-    route_holds = all_holds.get(route_uuid, [])
-    
-    if not route_holds:
-        return f"""
-        <svg viewBox="0 0 {width} {height}" xmlns="http://www.w3.org/2000/svg">
-            <text x="50%" y="50%" fill="gray" text-anchor="middle">Select a route</text>
-        </svg>
-        """
+# Top bar filters for quick access
+f_col1, f_col2 = st.columns([1, 2])
 
-    for hold_id in route_holds:
-        # Try both int and string lookup for robustness
-        coords = layout.get(hold_id) or layout.get(str(hold_id)) or layout.get(int(hold_id) if str(hold_id).isdigit() else -1)
-        
-        if coords:
-            cx, cy = coords['x'], coords['y']
-            svg_elements.append(f'<circle cx="{cx}" cy="{cy}" r="4" fill="#00FFFF" opacity="0.6" filter="blur(2px)" />')
-            svg_elements.append(f'<circle cx="{cx}" cy="{cy}" r="2" fill="white" />')
-            svg_elements.append(f'<circle cx="{cx}" cy="{cy}" r="3.5" stroke="#00FFFF" stroke-width="0.5" fill="none" />')
+with f_col1:
+    # Grade Range
+    min_g = int(df['normalized_grade'].min())
+    max_g = int(df['normalized_grade'].max())
+    grade_range = st.slider("Grade Range", min_g, max_g, (min_g, max_g))
 
-    return f"""
-    <svg viewBox="0 0 {width} {height}" style="width:100%; height:auto; max-height:60vh; background:#222; border-radius:8px;">
-        {''.join(svg_elements)}
-    </svg>
-    """
+with f_col2:
+    # Text Search (Replaces useless dropdown)
+    search_query = st.text_input("Search Route Name", placeholder="e.g. 'Jedi Mind Tricks'...")
+
+# Apply Filters
+mask = (
+    (df['normalized_grade'] >= grade_range[0]) & 
+    (df['normalized_grade'] <= grade_range[1])
+)
+
+# Text Search Logic
+if search_query:
+    mask = mask & (df[name_col].astype(str).str.contains(search_query, case=False, na=False))
+
+filtered_df = df[mask].copy()
+
+# ==========================================
+# CHART OPTIMIZATION
+# ==========================================
+# Subsample for performance if needed
+if len(filtered_df) > max_points:
+    # Try to sort by 'ascents' or 'stars' if available to show "best" routes first
+    sort_candidates = [c for c in df.columns if 'ascent' in c.lower() or 'star' in c.lower()]
+    if sort_candidates:
+        chart_df = filtered_df.sort_values(sort_candidates[0], ascending=False).head(max_points)
+        st.caption(f"Showing top {max_points} of {len(filtered_df)} routes (sorted by {sort_candidates[0]})")
+    else:
+        chart_df = filtered_df.sample(max_points)
+        st.caption(f"Showing random {max_points} of {len(filtered_df)} routes")
+else:
+    chart_df = filtered_df
+    st.caption(f"Showing {len(chart_df)} routes")
 
 # ==========================================
 # UI LAYOUT
 # ==========================================
 col1, col2 = st.columns([1.5, 1])
 
-# --- LEFT COLUMN: MAP ---
+# --- LEFT: INTERACTIVE MAP ---
 with col1:
-    st.caption(f"Showing {len(filtered_df)} routes")
-    
-    selection = alt.selection_point(fields=['uuid'], on='click', empty=False)
+    # Selection object
+    sel = alt.selection_point(
+        name="point_select",
+        on="click", 
+        fields=['uuid'], 
+        empty=False
+    )
 
-    tooltip_fields = ['name', 'difficulty']
-    if 'angle' in filtered_df.columns:
-        tooltip_fields.append('angle')
-
-    chart = alt.Chart(filtered_df).mark_circle(size=80).encode(
+    # Base Chart
+    base = alt.Chart(chart_df).encode(
         x=alt.X('x', axis=None),
         y=alt.Y('y', axis=None),
-        color=alt.Color('difficulty', scale=alt.Scale(scheme='turbo'), legend=None),
-        tooltip=tooltip_fields,
-        opacity=alt.condition(selection, alt.value(1), alt.value(0.1))
-    ).add_params(
-        selection
-    ).properties(
-        height=500
-    ).interactive()
+        color=alt.Color('normalized_grade', title="Grade", scale=alt.Scale(scheme='turbo')),
+        tooltip=[name_col, grade_col]
+    )
 
-    # UPDATED: Use width='stretch' as requested by warning logs
+    # Points
+    points = base.mark_circle(size=80, opacity=0.8).encode(
+        # Conditional opacity for selection
+        opacity=alt.condition(sel, alt.value(1), alt.value(0.1)),
+        # Conditional size for selection (make selected pop)
+        size=alt.condition(sel, alt.value(200), alt.value(80))
+    ).add_params(sel).interactive()
+
+    # RENDER WITH ON_SELECT (Fixes the clicking issue)
+    # This requires Streamlit >= 1.35.0
     try:
-        st.altair_chart(chart, width="stretch", theme="streamlit")
-    except:
-        st.altair_chart(chart, use_container_width=True, theme="streamlit")
+        event = st.altair_chart(points, use_container_width=True, on_select="rerun", theme="streamlit")
+    except TypeError:
+        st.error("⚠️ You need a newer version of Streamlit (>=1.35) for click events to work perfectly.")
+        event = st.altair_chart(points, use_container_width=True, theme="streamlit")
 
-
-# --- RIGHT COLUMN: BOARD VIEW ---
+# --- RIGHT: BOARD VIEW ---
 with col2:
     selected_uuid = None
-    
-    unique_names = filtered_df['name'].astype(str).unique()
-    
-    route_choice = st.selectbox(
-        "Search or Select", 
-        unique_names,
-        index=None,
-        placeholder="Tap point on map..."
-    )
-    
-    if route_choice:
-        record = filtered_df[filtered_df['name'] == route_choice].iloc[0]
-        selected_uuid = record['uuid']
+    selected_name = "None"
+    selected_grade = ""
+
+    # 1. Check if user CLICKED the chart
+    if event and hasattr(event, 'selection') and 'point_select' in event.selection:
+        selection_data = event.selection['point_select']
+        if selection_data:
+            # Altair returns a list of dicts, grab the first one
+            selected_uuid = selection_data[0]['uuid']
+            
+            # Look up details
+            row = df[df['uuid'] == selected_uuid].iloc[0]
+            selected_name = row[name_col]
+            selected_grade = f"V{row['normalized_grade']}"
+
+    # 2. Check if user SEARCHED (Override click if search matches exactly 1)
+    if search_query and len(filtered_df) == 1:
+        row = filtered_df.iloc[0]
+        selected_uuid = row['uuid']
+        selected_name = row[name_col]
+        selected_grade = f"V{row['normalized_grade']}"
+
+    # --- BOARD RENDERER ---
+    def generate_board_svg(uuid, holds_map, layout):
+        width, height = 150, 160
+        svg = [f'<rect x="0" y="0" width="{width}" height="{height}" fill="#151515" rx="4" />']
         
-        st.write(f"**{record['name']}** (V{record['difficulty']})")
+        route_holds = holds_map.get(uuid, [])
+        if not route_holds:
+            return f'<svg viewBox="0 0 {width} {height}"><text x="75" y="80" fill="#555" text-anchor="middle" font-family="sans-serif" font-size="10">Select a Route</text></svg>'
+
+        for h in route_holds:
+            # Robust lookup (int/str)
+            coords = layout.get(h) or layout.get(str(h)) or layout.get(int(h) if str(h).isdigit() else -1)
+            if coords:
+                cx, cy = coords['x'], coords['y']
+                # Glow
+                svg.append(f'<circle cx="{cx}" cy="{cy}" r="5" fill="#00FFFF" opacity="0.4" filter="blur(2px)" />')
+                # Core
+                svg.append(f'<circle cx="{cx}" cy="{cy}" r="2.5" fill="#EEFFFF" />')
+                # Ring
+                svg.append(f'<circle cx="{cx}" cy="{cy}" r="4" stroke="#00FFFF" stroke-width="0.8" fill="none" />')
         
-        svg_code = generate_board_svg(selected_uuid, holds_map, layout_map)
-        st.markdown(svg_code, unsafe_allow_html=True)
-        
+        return f'<svg viewBox="0 0 {width} {height}" style="width:100%; height:auto; max-height:70vh; background:#222; border-radius:8px; box-shadow: 0 4px 12px rgba(0,0,0,0.3);">{ "".join(svg) }</svg>'
+
+    # Display Selection Info
+    if selected_uuid:
+        st.markdown(f"### {selected_name} <span style='color:cyan'>{selected_grade}</span>", unsafe_allow_html=True)
+        # Show board
+        st.markdown(generate_board_svg(selected_uuid, holds_map, layout_map), unsafe_allow_html=True)
     else:
-        st.info("👈 Tap a route on the map or search above")
+        st.info("👆 Tap a dot on the chart to view")
         st.markdown(generate_board_svg(None, {}, {}), unsafe_allow_html=True)
